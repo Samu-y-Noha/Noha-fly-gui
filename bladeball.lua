@@ -9,8 +9,8 @@ local Services = {
     Task = _G_Lua:GetService("task"),
     UserInputService = _G_Lua:GetService("UserInputService"),
     HttpService = _G_Lua:GetService("HttpService"),
-    ReplicatedStorage = _G_Lua:GetService("ReplicatedStorage"), -- Añadido de tu script
-    TweenService = _G_Lua:GetService("TweenService"), -- Añadido de tu script
+    ReplicatedStorage = _G_Lua:GetService("ReplicatedStorage"),
+    TweenService = _G_Lua:GetService("TweenService"),
 }
 local Math = math
 local Vec3 = Vector3.new
@@ -65,7 +65,7 @@ local ShadowState = {
     Mode = "Normal", -- "Normal" o "Turbo" (asistencia máxima)
     AssistEnabled = true, -- Puede togglearse vía GUI
     TurboKeyDown = false,
-    HumanOverride = false,
+    HumanOverride = false, -- Determinado por la actividad del jugador
 
     -- MIMETISMO AVANZADO:
     MimesisActive = false,
@@ -126,12 +126,18 @@ local ShadowProtocols = {
     EnvironmentalSenseRadius = 3.4,
     AdaptationLearningRate = 0.0007,
 
-    -- Añadidos de tu script
+    -- Añadidos de tu script y valores por defecto faltantes
     ParryCooldown = 0.5, -- Cooldown para parry
     BaseMovementSpeed = 16, -- Velocidad base del jugador (Roblox default)
     DynamicSpeedMultiplier = 1.2, -- Multiplicador para asistencia dinámica
     BaseJumpPower = 50, -- Poder de salto base
-    BallReturnForceScale = 1.0, -- Añadido: Escala de fuerza de retorno de la bola (ajustable)
+    KineticTraceDepth = 30, -- Profundidad del historial cinético
+    EmergencyRange = 30, -- Rango de detección de bola de emergencia (de tu script)
+    BreathingCycleMin = 0.01, -- Mínimo para el ciclo de respiración
+    BreathingCycleMax = 0.05, -- Máximo para el ciclo de respiración
+    InputJitterMin = 0.001, -- Mínimo para el jitter de input
+    InputJitterMax = 0.005, -- Máximo para el jitter de input
+    BallReturnForceScale = 1.0, -- Escala de fuerza al devolver la bola
 }
 
 local GUISettings = {
@@ -261,7 +267,7 @@ local function FindMimesisTarget()
         end
     end
     return bestTarget
-end
+}
 
 local function MimesisObservationTick()
     if not ShadowState.MimesisActive or not ShadowState.MimesisLearningMode then return end
@@ -327,7 +333,7 @@ local function UpdateKineticTrace(obj, historyTable)
     local currentPos = obj.Position
     local currentVel = obj.AssemblyLinearVelocity or Vec3(0,0,0)
     local currentTime = Ck()
-    local lastEntry = historyTable[3]
+    local lastEntry = historyTable[1]
     local currentAccel = Vec3(0,0,0)
     if lastEntry and (currentTime - lastEntry.Time) > 0.001 then
         currentAccel = (currentVel - lastEntry.Vel) / (currentTime - lastEntry.Time)
@@ -337,63 +343,20 @@ local function UpdateKineticTrace(obj, historyTable)
         smoothedVel = smoothedVel:Lerp(lastEntry.Vel, 0.5)
     end
     TableUtil.insert(historyTable, 1, {Pos = currentPos, Vel = smoothedVel, Accel = currentAccel, Time = currentTime})
-    if #historyTable > 30 then -- Profundidad del KineticTrace
+    if #historyTable > ShadowProtocols.KineticTraceDepth then
         TableUtil.remove(historyTable, #historyTable)
     end
 end
 
 local function PredictTrajectory(history, futureTime)
     if #history < 2 then return nil end
-    -- CORRECCIÓN: Cambiado history.[3]Pos a history.[3]Pos (y similar para otros)
-    local p1 = history.[3]Pos; local v1 = history.[3]Vel; local a1 = history.[3]Accel; local t1 = history.[3]Time
-    local p2 = history.[4]Pos; local v2 = history.[4]Vel; local a2 = history.[4]Accel; local t2 = history.[4]Time
+    local p1 = history.[1]Pos; local v1 = history.[1]Vel; local a1 = history.[1]Accel; local t1 = history.[1]Time
+    local p2 = history.[2]Pos; local v2 = history.[2]Vel; local a2 = history.[2]Accel; local t2 = history.[2]Time
     local interpolatedAccel = a1:Lerp(a2, (Ck() - t1) / (t2 - t1 + 0.001))
     return p1 + (v1 * futureTime) + (0.5 * interpolatedAccel * futureTime^2)
 end
 
 local MouseClickFunction = nil
--- Variable para almacenar la referencia del RemoteEvent de parry encontrado
-local ParryRemoteEvent = nil
-
--- Función para buscar el RemoteEvent de parry dinámicamente
-local function FindParryRemoteEvent()
-    -- Nombres comunes o patrones que podría tener el RemoteEvent de parry
-    local potentialNames = {"ParryEvent", "SwingRemote", "BladeBallParry", "CombatEvent", "InputEvent", "ActionRemote"}
-    local foundEvent = nil
-
-    -- Buscar en ReplicatedStorage
-    for _, child in ipairs(Services.ReplicatedStorage:GetDescendants()) do
-        if child:IsA("RemoteEvent") then
-            for _, namePattern in ipairs(potentialNames) do
-                if StrManip.find(child.Name, namePattern, 1, true) then -- Búsqueda exacta o parcial
-                    foundEvent = child
-                    LogShadowActivity("RemoteEvent de Parry encontrado en ReplicatedStorage: %s", foundEvent.Name)
-                    return foundEvent
-                end
-            end
-        end
-    end
-
-    -- Buscar en la herramienta del jugador (si existe y tiene una)
-    local char = LocalPlayer.Character
-    local tool = char and char:FindFirstChildOfClass("Tool")
-    if tool then
-        for _, child in ipairs(tool:GetDescendants()) do
-            if child:IsA("RemoteEvent") then
-                for _, namePattern in ipairs(potentialNames) do
-                    if StrManip.find(child.Name, namePattern, 1, true) then
-                        foundEvent = child
-                        LogShadowActivity("RemoteEvent de Parry encontrado en la herramienta: %s", foundEvent.Name)
-                        return foundEvent
-                    end
-                end
-            end
-        end
-    end
-
-    return nil
-end
-
 Services.RunService.Heartbeat:Connect(function()
     if MouseClickFunction == nil then
         local mouse = LocalPlayer:GetMouse()
@@ -404,22 +367,34 @@ Services.RunService.Heartbeat:Connect(function()
             MouseClickFunction = _G_Lua.mouse1click
             LogShadowActivity("Método de clic: _G_Lua.mouse1click.")
         else
-            -- Intentar encontrar el RemoteEvent dinámicamente
-            if not ParryRemoteEvent then
-                ParryRemoteEvent = FindParryRemoteEvent()
-            end
-
-            if ParryRemoteEvent and ParryRemoteEvent:IsA("RemoteEvent") then
-                MouseClickFunction = function() ParryRemoteEvent:FireServer() end
-                LogShadowActivity("Método de clic: RemoteEvent dinámico (%s).", ParryRemoteEvent.Name)
+            -- Fallback para exploits que no tienen mouse1click ni GetMouse().Click
+            -- ESTO ES CRÍTICO PARA ARCEUS X ANDROID SI LOS OTROS FALLAN.
+            -- NECESITAS REEMPLAZAR "RemoteEvent" CON EL NOMBRE REAL DEL REMOTE EVENT DE PARRY DE BLADE BALL.
+            -- EJEMPLOS COMUNES: "ParryEvent", "SwingRemote", "BlockEvent", "T1Sword" (si es un RemoteEvent dentro de la herramienta)
+            local char = LocalPlayer.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            -- Intenta buscar el RemoteEvent en la herramienta o en ReplicatedStorage
+            local remoteEvent = (tool and tool:FindFirstChild("RemoteEvent")) or Services.ReplicatedStorage:FindFirstChild("RemoteEvent") -- <<-- AJUSTA ESTE NOMBRE Y RUTA
+            
+            if remoteEvent and remoteEvent:IsA("RemoteEvent") then
+                MouseClickFunction = function()
+                    -- Intenta usar syn.set_thread_identity si el exploit lo soporta (comando "más fuerte")
+                    if _G_Lua.syn and typeof(_G_Lua.syn.set_thread_identity) == "function" then
+                        _G_Lua.syn.set_thread_identity(7) -- Identidad de thread común para bypass
+                        LogShadowActivity("Usando syn.set_thread_identity(7) antes de FireServer.")
+                    end
+                    remoteEvent:FireServer()
+                end
+                LogShadowActivity("Método de clic: RemoteEvent genérico. ¡VERIFICA EL NOMBRE Y RUTA EN EL CÓDIGO!")
             else
                 -- Último recurso: Simular pulsación de tecla (si el juego usa una tecla para parry)
+                -- Tu script sugiere Enum.KeyCode.E
                 MouseClickFunction = function()
                     Services.UserInputService:SimulateKeyPress(Enum.KeyCode.E)
                     Services.Task.wait(0.05) -- Pequeño delay para simular pulsación y liberación
                     Services.UserInputService:SimulateKeyRelease(Enum.KeyCode.E)
                 end
-                LogShadowActivity("Método de clic: Simulación de tecla 'E' (fallback).")
+                LogShadowActivity("Método de clic: Simulación de tecla 'E'.")
             end
         end
     end
@@ -468,7 +443,7 @@ local function DetermineStrategicTargetPoint(playerPos, targetRootPart, targetKi
     local predictedTargetPos = PredictTrajectory(targetKineticTrace, ShadowProtocols.TargetLookAhead) or targetPos
 
     -- Calcular la "zona débil" del oponente (basado en su movimiento actual)
-    local targetMoveDirection = targetKineticTrace[3] and targetKineticTrace.[3]Vel.Unit or Vec3(0,0,0) -- CORRECCIÓN: history.[3]Vel a history.[3]Vel
+    local targetMoveDirection = targetKineticTrace[1] and targetKineticTrace.[1]Vel.Unit or Vec3(0,0,0)
 
     local possibleTargetZones = {
         predictedTargetPos + Vec3(10, 0, 10), -- Delante-Derecha
@@ -724,7 +699,7 @@ end)
 
 -- ========== NÚCLEO DE JUEGO (Lógica principal de parry y movimiento) ==========
 Services.RunService.Stepped:Connect(function()
-    if not ShadowState.AssistEnabled or not ShadowState.GameActive or ShadowState.HumanOverride then return end -- Usar HumanOverride
+    if not ShadowState.AssistEnabled or not ShadowState.GameActive or ShadowState.HumanOverride then return end
     if not PlayerChar or not PlayerHum or not PlayerRoot or PlayerHum.Health <= 0 then return end
     if not ShadowState.BallRef or not ShadowState.TargetRef then return end
 
@@ -750,18 +725,17 @@ Services.RunService.Stepped:Connect(function()
     ShadowState.DynamicReactionDelay = ShadowState.DynamicReactionDelay * (1 + ShadowState.ObservationLevel * ShadowProtocols.ObservationPenaltyFactor) -- Mayor retraso si se observa
 
     -- Lógica de Auto Parry (Fusionada y Mejorada)
-    if not ShadowState.ParryLock and (Ck() - ShadowState.LastParryExecutionTime > ShadowProtocols.ParryCooldown) then -- Usar ParryCooldown
+    if not ShadowState.ParryLock and (Ck() - ShadowState.LastParryExecutionTime > ShadowProtocols.ParryCooldown) then
         local predictedBallPos = PredictTrajectory(ShadowState.BallKineticTrace, ShadowProtocols.AnticipationWindow)
         if not predictedBallPos then return end
         local distToPredictedBall = (playerPos - predictedBallPos).Magnitude
         local ballDirectionToPlayer = (playerPos - ShadowState.BallRef.Position).Unit
-        local ballTravelDirection = (ShadowState.BallRef.AssemblyLinearVelocity or (ShadowState.BallKineticTrace[3] and ShadowState.BallKineticTrace.[3]Vel)).Unit -- CORRECCIÓN: history.[3]Vel a history.[3]Vel
+        local ballTravelDirection = (ShadowState.BallRef.AssemblyLinearVelocity or (ShadowState.BallKineticTrace[1] and ShadowState.BallKineticTrace.[1]Vel)).Unit
         local alignment = ballTravelDirection:Dot(ballDirectionToPlayer)
         local currentPerceptionRange = ShadowProtocols.PerceptionRange
-        -- Tu script usa 30 studs como rango, mi PerceptionRange es 10.2. Usaremos un rango de emergencia si está muy cerca.
-        local emergencyRange = 30 -- De tu script
-        if distToPredictedBall < emergencyRange and distToPredictedBall > ShadowProtocols.PerceptionRange then
-            currentPerceptionRange = emergencyRange
+        
+        if distToPredictedBall < ShadowProtocols.EmergencyRange and distToPredictedBall > ShadowProtocols.PerceptionRange then
+            currentPerceptionRange = ShadowProtocols.EmergencyRange
             LogShadowActivity("Modo PÁNICO activado. Bola cercana.")
         end
 
@@ -779,7 +753,7 @@ Services.RunService.Stepped:Connect(function()
             ShadowState.ParryLock = true
             Services.Task.spawn(function()
                 Services.Task.wait(ShadowState.DynamicReactionDelay)
-                local currentBallSpeed = (ShadowState.BallRef.AssemblyLinearVelocity or (ShadowState.BallKineticTrace[3] and ShadowState.BallKineticTrace.[3]Vel)).Magnitude -- CORRECCIÓN: history.[3]Vel a history.[3]Vel
+                local currentBallSpeed = (ShadowState.BallRef.AssemblyLinearVelocity or (ShadowState.BallKineticTrace[1] and ShadowState.BallKineticTrace.[1]Vel)).Magnitude
 
                 -- Calular la fuerza de retorno con variación
                 local forceVariance = Math.random(-ShadowProtocols.BallForceVariance * 100, ShadowProtocols.BallForceVariance * 100) / 100
@@ -855,22 +829,31 @@ end)
 
 -- ========== GUI PRINCIPAL AVANZADA: "ESPECTRAL" ==========
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-local MainGUI = InstCreate("ScreenGui", PlayerGui)
-MainGUI.Name = "ShadowSymphonyGUI"
-MainGUI.ResetOnSpawn = false
-MainGUI.Enabled = true -- Asegurarse de que la ScreenGui esté habilitada
+local MainGUI = nil
+local success, err = pcall(function()
+    MainGUI = InstCreate("ScreenGui")
+    MainGUI.Name = "ShadowSymphonyGUI"
+    MainGUI.ResetOnSpawn = false
+    MainGUI.Enabled = true -- Asegurarse de que la ScreenGui esté habilitada
+    MainGUI.Parent = PlayerGui
+    Services.Task.wait(0.1) -- Pequeña espera para que la GUI se inicialice
+end)
+
+if not success then
+    warn("Error al crear ScreenGui: ".. err)
+    LogShadowActivity("ERROR CRÍTICO: No se pudo crear la GUI. %s", err)
+    return -- Detener el script si la GUI no se puede crear
+end
 
 local GUIFrame = InstCreate("Frame", MainGUI)
--- Ajustar el tamaño y la posición para que sean escalables y se adapten a la pantalla
-GUIFrame.Size = UdimFactory(0.3, 0, 0.6, 0) -- 30% del ancho, 60% del alto de la pantalla
-GUIFrame.Position = UdimFactory(0.35, 0, 0.2, 0) -- Centrado aproximadamente
+GUIFrame.Size = UdimFactory(0, 340, 0, 650) -- Aumentado para más opciones
+GUIFrame.Position = UdimFactory(0.015, 0, 0.09, 0)
 GUIFrame.BackgroundColor3 = GUISkins.bg()
 GUIFrame.BorderSizePixel = 3
 GUIFrame.BorderColor3 = GUISkins.border()
 GUIFrame.Draggable = true
-GUIFrame.BackgroundTransparency = 0 -- Forzar opacidad para depuración inicial
+GUIFrame.BackgroundTransparency = GUISettings.GUITransparency
 GUIFrame.Visible = true -- Asegurarse de que el Frame esté visible
-GUIFrame.ZIndex = 10 -- Asegurarse de que esté en la capa superior
 
 local GUITitle = InstCreate("TextLabel", GUIFrame)
 GUITitle.Size = UdimFactory(1,0,0,32)
@@ -1012,8 +995,7 @@ end
 -- Toggles generales (fusionados de 6.x, 7.0 y tu script)
 CreateToggle(GUIFrame, "Asistencia Activa", "AssistEnabled", yOffset, ShadowState); yOffset = yOffset + 28
 CreateToggle(GUIFrame, "Logs Visuales", "EnableLogs", yOffset, GUISettings); yOffset = yOffset + 28
--- Desactivar FadeGUIWhenObserved para depuración inicial
--- CreateToggle(GUIFrame, "GUI Transparencia Auto", "FadeGUIWhenObserved", yOffset, GUISettings); yOffset = yOffset + 28
+CreateToggle(GUIFrame, "GUI Transparencia Auto", "FadeGUIWhenObserved", yOffset, GUISettings); yOffset = yOffset + 28
 CreateToggle(GUIFrame, "Mostrar Ping", "DisplayPing", yOffset, GUISettings); yOffset = yOffset + 28
 CreateDropdown(GUIFrame, "Skin Visual", {"Plasma","Blade","Neon","Matrix"}, "Skin", yOffset, GUISettings, function()
     GUIFrame.BackgroundColor3 = GUISkins.bg()
@@ -1026,8 +1008,8 @@ CreateDropdown(GUIFrame, "Modo de Apuntado", {"AuraPredictive","EvadePredict","H
 CreateToggle(GUIFrame, "Movimiento en Reposo", "IdleMovementActive", yOffset, ShadowProtocols); yOffset = yOffset + 28
 CreateToggle(GUIFrame, "Detección Ambiente", "EnvironmentalSenseRadius", yOffset, ShadowProtocols); yOffset = yOffset + 28
 CreateToggle(GUIFrame, "Error Humano Ctrl.", "DeliberateMissChance", yOffset, ShadowProtocols); yOffset = yOffset + 28
-CreateToggle(GUIFrame, "Asistencia Dinámica", "dynamicAssistanceEnabled", yOffset, ShadowState); yOffset = yOffset + 28 -- De tu script
-CreateToggle(GUIFrame, "ESP Activo", "espEnabled", yOffset, ShadowState); yOffset = yOffset + 28 -- De tu script
+CreateToggle(GUIFrame, "Asistencia Dinámica", "dynamicAssistanceEnabled", yOffset, ShadowState); yOffset = yOffset + 28
+CreateToggle(GUIFrame, "ESP Activo", "espEnabled", yOffset, ShadowState); yOffset = yOffset + 28
 
 
 -- Botones de Perfiles Principal
@@ -1222,6 +1204,6 @@ for _, player in pairs(Services.Players:GetPlayers()) do
     end
 end
 
-LogShadowActivity("SUPREMACY: SINFONÍA DE LA SOMBRA - EVOLUCIÓN 7.3 LISTA. Disfruta el poder sin perder la diversión.")
+LogShadowActivity("SUPREMACY: SINFONÍA DE LA SOMBRA - EVOLUCIÓN 7.5 LISTA. Disfruta el poder sin perder la diversión.")
 
--- FIN DE LA EVOLUCIÓN 7.3. Esperando la próxima iteración o un nuevo script para fusionar y mejorar.
+-- FIN DE LA EVOLUCIÓN 7.5. Esperando la próxima iteración o un nuevo script para fusionar y mejorar.
